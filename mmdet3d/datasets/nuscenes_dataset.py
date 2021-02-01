@@ -101,6 +101,58 @@ class NuScenesDataset(Custom3DDataset):
                'bicycle', 'motorcycle', 'pedestrian', 'traffic_cone',
                'barrier')
 
+    PointClassMapping = {
+        'animal': 'ignore',
+        'human.pedestrian.personal_mobility': 'ignore',
+        'human.pedestrian.stroller': 'ignore',
+        'human.pedestrian.wheelchair': 'ignore',
+        'movable_object.debris': 'ignore',
+        'movable_object.pushable_pullable': 'ignore',
+        'static_object.bicycle_rack': 'ignore',
+        'vehicle.emergency.ambulance': 'ignore',
+        'vehicle.emergency.police': 'ignore',
+        'noise': 'ignore',
+        'static.other': 'ignore',
+        'vehicle.ego': 'ignore',
+        'movable_object.barrier': 'barrier',
+        'vehicle.bicycle': 'bicycle',
+        'vehicle.bus.bendy': 'bus',
+        'vehicle.bus.rigid': 'bus',
+        'vehicle.car': 'car',
+        'vehicle.construction': 'construction_vehicle',
+        'vehicle.motorcycle': 'motorcycle',
+        'human.pedestrian.adult': 'pedestrian',
+        'human.pedestrian.child': 'pedestrian',
+        'human.pedestrian.construction_worker': 'pedestrian',
+        'human.pedestrian.police_officer': 'pedestrian',
+        'movable_object.trafficcone': 'traffic_cone',
+        'vehicle.trailer': 'trailer',
+        'vehicle.truck': 'truck',
+        'flat.driveable_surface': 'driveable_surface',
+        'flat.other': 'other_flat',
+        'flat.sidewalk': 'sidewalk',
+        'flat.terrain': 'terrain',
+        'static.manmade': 'manmade',
+        'static.vegetation': 'vegetation'
+    }
+
+    POINT_CLASS_GENERAL = ('noise', 'animal', 'human.pedestrian.adult', 'human.pedestrian.child',
+                           'human.pedestrian.construction_worker', 'human.pedestrian.personal_mobility',
+                           'human.pedestrian.police_officer', 'human.pedestrian.stroller',
+                           'human.pedestrian.wheelchair', 'movable_object.barrier',
+                           'movable_object.debris', 'movable_object.pushable_pullable',
+                           'movable_object.trafficcone', 'static_object.bicycle_rack',
+                           'vehicle.bicycle', 'vehicle.bus.bendy', 'vehicle.bus.rigid',
+                           'vehicle.car', 'vehicle.construction', 'vehicle.emergency.ambulance',
+                           'vehicle.emergency.police', 'vehicle.motorcycle', 'vehicle.trailer',
+                           'vehicle.truck', 'flat.driveable_surface', 'flat.other', 'flat.sidewalk',
+                           'flat.terrain', 'static.manmade', 'static.other', 'static.vegetation', 'vehicle.ego')
+
+    POINT_CLASS_SEG = ('ignore', 'barrier', 'bicycle', 'bus', 'car', 'construction_vehicle',
+                       'motorcycle', 'pedestrian', 'traffic_cone', 'trailer', 'truck',
+                       'driveable_surface', 'other_flat', 'sidewalk', 'terrain', 'manmade',
+                       'vegetation')
+
     def __init__(self,
                  ann_file,
                  pipeline=None,
@@ -113,7 +165,8 @@ class NuScenesDataset(Custom3DDataset):
                  filter_empty_gt=True,
                  test_mode=False,
                  eval_version='detection_cvpr_2019',
-                 use_valid_flag=False):
+                 use_valid_flag=False,
+                 with_point_label=False):
         self.load_interval = load_interval
         self.use_valid_flag = use_valid_flag
         super().__init__(
@@ -138,6 +191,13 @@ class NuScenesDataset(Custom3DDataset):
                 use_map=False,
                 use_external=False,
             )
+
+        self.with_point_label = with_point_label
+        if self.with_point_label:
+            point_label_mapping = []
+            for name in NuScenesDataset.POINT_CLASS_GENERAL:
+                point_label_mapping.append(NuScenesDataset.POINT_CLASS_SEG.index(NuScenesDataset.PointClassMapping[name]))
+            self.point_label_mapping = np.array(point_label_mapping, dtype=np.uint8)
 
     def get_cat_ids(self, idx):
         """Get category distribution of single scene.
@@ -284,6 +344,12 @@ class NuScenesDataset(Custom3DDataset):
             gt_bboxes_3d=gt_bboxes_3d,
             gt_labels_3d=gt_labels_3d,
             gt_names=gt_names_3d)
+
+        if self.with_point_label:
+            pts_semantic_mask_path = info['lidar_pts_labels_filepath']
+            pts_semantic_mask = np.fromfile(pts_semantic_mask_path, dtype=np.uint8).reshape([-1, 1])
+            pts_semantic_mask = self.point_label_mapping[pts_semantic_mask]
+            anns_results['pts_semantic_mask'] = pts_semantic_mask
         return anns_results
 
     def _format_bbox(self, results, jsonfile_prefix=None):
@@ -489,6 +555,49 @@ class NuScenesDataset(Custom3DDataset):
         if show:
             self.show(results, out_dir)
         return results_dict
+
+    def evaluate_seg(self,
+                 results,
+                 result_names=['sem_preds'],
+                 show=False,
+                 out_dir=None):
+        print("####################")
+        print("#    Evaluation    #")
+        print("####################")
+
+        from ..selectiveseg.metric_utils import eval_hist_crop, per_class_iou
+
+        class_names = self.POINT_CLASS_SEG[1:]
+
+        hist_all = []
+        for i, res in enumerate(results):
+            sem_preds = res['sem_preds']
+
+            info = self.data_infos[i]
+            pts_semantic_mask_path = info['lidar_pts_labels_filepath']
+            pts_semantic_mask = np.fromfile(pts_semantic_mask_path, dtype=np.uint8).reshape([-1, 1])
+            pts_semantic_mask = self.point_label_mapping[pts_semantic_mask]
+
+            sem_preds = sem_preds.cpu().numpy()
+
+            hist = eval_hist_crop(sem_preds, pts_semantic_mask, np.arange(len(class_names)))
+            hist_all.append(hist)
+
+            del sem_preds, pts_semantic_mask
+        iou_per_c = per_class_iou(sum(hist_all))
+        miou = np.nanmean(iou_per_c) * 100
+        print('Evaluation per class iou: ')
+
+        line_record = []
+        for name, class_iou in zip(class_names, iou_per_c):
+            print(f"{name}: {class_iou * 100:.2f}")
+            line_record.append(f"{name}: {class_iou * 100:.2f}")
+        print(f"-- MEAN IOU --: {miou:.2f}")
+        line_record.append(f"-- MEAN IOU --: {miou:.2f}")
+
+        if out_dir is not None:
+            line_record = np.array(line_record)
+            np.savetxt(out_dir+'/'+'eval_results.txt', line_record, fmt='%s')
 
     def show(self, results, out_dir):
         """Results visualization.

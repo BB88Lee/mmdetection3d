@@ -16,6 +16,9 @@ from .. import builder
 from .base import Base3DDetector
 
 
+import ipdb
+
+
 @DETECTORS.register_module()
 class MVXTwoStageDetector(Base3DDetector):
     """Base class of Multi-modality VoxelNet."""
@@ -37,11 +40,13 @@ class MVXTwoStageDetector(Base3DDetector):
                  pretrained=None):
         super(MVXTwoStageDetector, self).__init__()
 
-        if pts_voxel_layer:
+        if 'type' in pts_voxel_layer:
+            self.pts_voxel_cfg = pts_voxel_layer
+        else:
             self.pts_voxel_layer = Voxelization(**pts_voxel_layer)
-        if pts_voxel_encoder:
-            self.pts_voxel_encoder = builder.build_voxel_encoder(
-                pts_voxel_encoder)
+        #if pts_voxel_encoder:
+        #    self.pts_voxel_encoder = builder.build_voxel_encoder(
+        #        pts_voxel_encoder)
         if pts_middle_encoder:
             self.pts_middle_encoder = builder.build_middle_encoder(
                 pts_middle_encoder)
@@ -205,8 +210,8 @@ class MVXTwoStageDetector(Base3DDetector):
     def extract_feat(self, points, img, img_metas):
         """Extract features from images and points."""
         img_feats = self.extract_img_feat(img, img_metas)
-        pts_feats = self.extract_pts_feat(points, img_feats, img_metas)
-        return (img_feats, pts_feats)
+        pts_feats, voxel_feats, voxel_coors, point_feats, point_coors = self.extract_pts_feat(points, img_feats, img_metas)
+        return (img_feats, pts_feats, voxel_feats, voxel_coors, point_feats, point_coors)
 
     @torch.no_grad()
     @force_fp32()
@@ -244,7 +249,8 @@ class MVXTwoStageDetector(Base3DDetector):
                       gt_bboxes=None,
                       img=None,
                       proposals=None,
-                      gt_bboxes_ignore=None):
+                      gt_bboxes_ignore=None,
+                      pts_semantic_mask=None):
         """Forward training function.
 
         Args:
@@ -270,13 +276,18 @@ class MVXTwoStageDetector(Base3DDetector):
         Returns:
             dict: Losses of different branches.
         """
-        img_feats, pts_feats = self.extract_feat(
+        img_feats, pts_feats, voxel_feats, voxel_coors, point_feats, point_coors = self.extract_feat(
             points, img=img, img_metas=img_metas)
         losses = dict()
-        if pts_feats:
+        if pts_feats is not None:
             losses_pts = self.forward_pts_train(pts_feats, gt_bboxes_3d,
                                                 gt_labels_3d, img_metas,
-                                                gt_bboxes_ignore)
+                                                gt_bboxes_ignore,
+                                                pts_semantic_mask=pts_semantic_mask,
+                                                voxel_feats=voxel_feats,
+                                                voxel_coors=voxel_coors,
+                                                point_feats=point_feats,
+                                                point_coors=point_coors)
             losses.update(losses_pts)
         if img_feats:
             losses_img = self.forward_img_train(
@@ -401,20 +412,36 @@ class MVXTwoStageDetector(Base3DDetector):
 
     def simple_test(self, points, img_metas, img=None, rescale=False):
         """Test function without augmentaiton."""
-        img_feats, pts_feats = self.extract_feat(
+        img_feats, pts_feats, voxel_feats, voxel_coors, point_feats, point_coors = self.extract_feat(
             points, img=img, img_metas=img_metas)
 
+        semamtic_preds = self.simple_test_pts(
+                        pts_feats,
+                        img_metas,
+                        rescale=rescale,
+                        voxel_feats=voxel_feats,
+                        voxel_coors=voxel_coors,
+                        point_feats=point_feats,
+                        point_coors=point_coors)
+
+        bbox_list = [dict() for i in range(len(img_metas))]
+        for result_dict, sem_preds in zip(bbox_list, semamtic_preds):
+            result_dict['sem_preds'] = sem_preds
+
+        '''
         bbox_list = [dict() for i in range(len(img_metas))]
         if pts_feats and self.with_pts_bbox:
             bbox_pts = self.simple_test_pts(
                 pts_feats, img_metas, rescale=rescale)
             for result_dict, pts_bbox in zip(bbox_list, bbox_pts):
                 result_dict['pts_bbox'] = pts_bbox
+
         if img_feats and self.with_img_bbox:
             bbox_img = self.simple_test_img(
                 img_feats, img_metas, rescale=rescale)
             for result_dict, img_bbox in zip(bbox_list, bbox_img):
                 result_dict['img_bbox'] = img_bbox
+        '''
         return bbox_list
 
     def aug_test(self, points, img_metas, imgs=None, rescale=False):

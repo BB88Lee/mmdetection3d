@@ -506,6 +506,11 @@ class LoadAnnotations3D(LoadAnnotations):
         Returns:
             dict: The dict containing the semantic segmentation annotations.
         """
+        if 'pts_semantic_mask' in results['ann_info']:
+            results['pts_semantic_mask'] = results['ann_info']['pts_semantic_mask']
+            results['pts_seg_fields'].append('pts_semantic_mask')
+            return results
+
         pts_semantic_mask_path = results['ann_info']['pts_semantic_mask_path']
 
         if self.file_client is None:

@@ -138,7 +138,10 @@ def _fill_trainval_infos(nusc,
                          train_scenes,
                          val_scenes,
                          test=False,
-                         max_sweeps=10):
+                         max_sweeps=10,
+                         trans_data_for_show=False,
+                         root_save_path=None,
+                         need_val_scenes=True):
     """Generate the train/val infos from the raw data.
 
     Args:
@@ -156,6 +159,19 @@ def _fill_trainval_infos(nusc,
     train_nusc_infos = []
     val_nusc_infos = []
 
+
+    if trans_data_for_show:
+        point_label_mapping = []
+        for name in NuScenesDataset.POINT_CLASS_GENERAL:
+            point_label_mapping.append(NuScenesDataset.POINT_CLASS_SEG.index(NuScenesDataset.PointClassMapping[name]))
+        point_label_mapping = np.array(point_label_mapping, dtype=np.uint8)
+        set_idx = 0
+        F_cam_path = []
+        B_cam_path = []
+        assert root_save_path == None
+
+        from mmdet3d.core.bbox import box_np_ops as box_np_ops
+
     for sample in mmcv.track_iter_progress(nusc.sample):
         lidar_token = sample['data']['LIDAR_TOP']
         sd_rec = nusc.get('sample_data', sample['data']['LIDAR_TOP'])
@@ -165,6 +181,9 @@ def _fill_trainval_infos(nusc,
         lidar_path, boxes, _ = nusc.get_sample_data(lidar_token)
 
         mmcv.check_file_exist(lidar_path)
+
+        if need_val_scenes and sample['scene_token'] in train_scenes:
+            continue
 
         info = {
             'lidar_path': lidar_path,
@@ -254,6 +273,73 @@ def _fill_trainval_infos(nusc,
             info['num_radar_pts'] = np.array(
                 [a['num_radar_pts'] for a in annotations])
             info['valid_flag'] = valid_flag
+
+            # lidarseg labels
+            lidarseg_labels_filepath = os.path.join(nusc.dataroot,
+                                                    nusc.get('lidarseg', lidar_token)['filename'])
+            info['lidar_pts_labels_filepath'] = lidarseg_labels_filepath
+
+
+        if trans_data_for_show:
+            need_raw_data, need_calib, need_pts_label = False, False, True
+            points = np.fromfile(lidar_path, dtype=np.float32).reshape(-1, 5)
+            file_name = str(set_idx).zfill(6)
+            if need_raw_data:
+                # point cloud
+                pts_save_path = os.path.join(root_save_path, 'point_cloud')
+                postfix = '.bin'
+                points.tofile(pts_save_path+ '/' + file_name + postfix)
+
+                cam_0_save_path = os.path.join(root_save_path, 'image_0/' + file_name + postfix)
+                cam_1_save_path = os.path.join(root_save_path, 'image_1/' + file_name + postfix)
+                # camera
+                postfix = '.jpg'
+                F_cam_path.append('cp ' + info['cams']['CAM_FRONT']['data_path'] + ' ' + cam_0_save_path)
+                B_cam_path.append('cp ' + info['cams']['CAM_BACK']['data_path'] + ' ' + cam_1_save_path)
+
+            if need_pts_label:
+                lidarseg_labels_filepath = os.path.join(nusc.dataroot,
+                                                        nusc.get('lidarseg', lidar_token)['filename'])
+                pts_semantic_mask = np.fromfile(lidarseg_labels_filepath, dtype=np.uint8).reshape([-1, 1])
+                pts_semantic_mask = point_label_mapping[pts_semantic_mask]
+
+                need_ins_label = True
+                if need_ins_label:
+                    # for instance label
+                    isinstance_label = np.zeros_like(pts_semantic_mask)
+                    point_indices = box_np_ops.points_in_rbbox(points, gt_boxes, origin=(0.5, 0.5, 0.5))
+                    point_indices = point_indices.transpose()
+                    for idx, cls_name in enumerate(names):
+                        #ins label from 1, not 0
+                        isinstance_label[point_indices[idx]] = idx + 1
+
+                    pts_semantic_mask = np.concatenate((pts_semantic_mask, isinstance_label), axis=-1)
+
+                sem_save_path = os.path.join(root_save_path, 'sem_ins_mask')
+                postfix = '.bin'
+                # we use uint8 as the mask label file type
+                pts_semantic_mask = np.array(pts_semantic_mask, dtype=np.uint8)
+                pts_semantic_mask.tofile(sem_save_path + '/' + file_name + postfix)
+
+            if need_calib:
+                '''
+                F_calib_s2l_r = info['cams']['CAM_FRONT']['sensor2lidar_rotation']
+                F_calib_s2l_t = info['cams']['CAM_FRONT']['sensor2lidar_translation'].reshape(1, 3)
+                F_calib_s2l_i = info['cams']['CAM_FRONT']['cam_intrinsic']
+                F_calib = np.concatenate((F_calib_s2l_r, F_calib_s2l_t, F_calib_s2l_i), axis=0)
+                postfix = '.txt'
+                calib_save_path = os.path.join(root_save_path, 'calib_0')
+                np.savetxt(calib_save_path+'/'+file_name+postfix, F_calib, fmt='%.16f')
+
+                B_calib_s2l_r = info['cams']['CAM_BACK']['sensor2lidar_rotation']
+                B_calib_s2l_t = info['cams']['CAM_BACK']['sensor2lidar_translation'].reshape(1, 3)
+                B_calib_s2l_i = info['cams']['CAM_BACK']['cam_intrinsic']
+                B_calib = np.concatenate((B_calib_s2l_r, B_calib_s2l_t, B_calib_s2l_i), axis=0)
+                calib_save_path = os.path.join(root_save_path, 'calib_1')
+                np.savetxt(calib_save_path+'/'+file_name+postfix, B_calib, fmt='%.16f')
+                '''
+            set_idx = set_idx + 1
+
 
         if sample['scene_token'] in train_scenes:
             train_nusc_infos.append(info)

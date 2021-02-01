@@ -438,7 +438,11 @@ class PointShuffle(object):
             dict: Results after filtering, 'points' keys are updated \
                 in the result dict.
         """
-        input_dict['points'].shuffle()
+        if 'pts_semantic_mask' in input_dict:
+            random_index = input_dict['points'].shuffle(return_index=True)
+            input_dict['pts_semantic_mask'] = input_dict['pts_semantic_mask'][random_index.numpy()]
+        else:
+            input_dict['points'].shuffle()
         return input_dict
 
     def __repr__(self):
